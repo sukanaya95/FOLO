@@ -12,6 +12,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300;9..144,600;9..144,800&family=DM+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script>pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';</script>
 <style>
 :root{--bg:#0f0f0f;--surface:#1a1a1a;--surface2:#242424;--border:#2e2e2e;--accent:#f0e040;--rust:#e8643a;--sage:#5cb87a;--sky:#5b9fd4;--lavender:#9b8ec4;--text:#f0ece4;--muted:#6b6560;--soft:#c8c0b4;--danger:#e85a5a;}
@@ -144,10 +145,10 @@ body{background:var(--bg);color:var(--text);font-family:'DM Mono',monospace;font
 
   <div class="page" id="page-import">
     <div class="section-title">Import Statement</div>
-    <div class="import-zone"><input type="file" accept=".pdf" id="pdfIn">
+    <div class="import-zone"><input type="file" accept=".pdf,.xlsx,.xls" id="pdfIn">
       <div style="font-size:32px;margin-bottom:10px">📄</div>
       <div style="font-family:'Fraunces',serif;font-size:18px;font-weight:600;margin-bottom:6px">Upload Paytm PDF</div>
-      <div style="font-size:11px;color:var(--muted);line-height:1.7">Paytm UPI Statement PDF<br>from the Paytm app<br><br><strong style="color:var(--accent)">Tap here to select file</strong></div>
+      <div style="font-size:11px;color:var(--muted);line-height:1.7">Paytm UPI Statement<br><strong style="color:var(--accent)">PDF or Excel (.xlsx)</strong> supported<br><br><strong style="color:var(--accent)">Tap here to select file</strong></div>
     </div>
     <div class="import-status" id="iStatus"></div>
     <div class="prog-wrap" id="progWrap"><div class="prog-bar" id="progBar"></div></div>
@@ -235,11 +236,72 @@ const DB={
 function defBud(){return{"Food & Dining":5000,"Transport":2000,"Shopping":4000,"Groceries":4000,"Bills & Utilities":3000,"Health":1500,"Entertainment":1500,"Transfers":0,"Savings":0,"Rent":0,"Education":2000,"Other":2000};}
 
 // ═══════════════════════════════════════════
-//  PDF PARSER — column-aware for Paytm table
+//  FILE HANDLER — PDF or XLSX
 // ═══════════════════════════════════════════
 document.getElementById('pdfIn').addEventListener('change',async function(e){
-  const f=e.target.files[0];if(!f)return;this.value='';await parsePDF(f);
+  const f=e.target.files[0];if(!f)return;this.value='';
+  if(f.name.match(/\.xlsx?$/i)){await parseXLSX(f);}
+  else{await parsePDF(f);}
 });
+
+// ═══════════════════════════════════════════
+//  XLSX PARSER — Paytm Excel Statement
+// ═══════════════════════════════════════════
+async function parseXLSX(file){
+  stat('⏳ Reading Excel file...','load');prog(10);
+  try{
+    const buf=await file.arrayBuffer();
+    const zip=await JSZip.loadAsync(buf);
+    prog(30);
+    const ssXml=await zip.file('xl/sharedStrings.xml').async('text');
+    const ssDoc=new DOMParser().parseFromString(ssXml,'text/xml');
+    const strings=[...ssDoc.querySelectorAll('t')].map(t=>t.textContent||'');
+    const wbXml=await zip.file('xl/workbook.xml').async('text');
+    const wbDoc=new DOMParser().parseFromString(wbXml,'text/xml');
+    const sheetEls=[...wbDoc.querySelectorAll('sheet')];
+    let sheetId='2';
+    sheetEls.forEach(s=>{if((s.getAttribute('name')||'').toLowerCase().includes('passbook'))sheetId=s.getAttribute('sheetId');});
+    prog(50);
+    const wsXml=await zip.file('xl/worksheets/sheet'+sheetId+'.xml').async('text');
+    const wsDoc=new DOMParser().parseFromString(wsXml,'text/xml');
+    const rows=[...wsDoc.querySelectorAll('row')];
+    prog(70);
+    function cellVal(cell){if(!cell)return'';const t=cell.getAttribute('t')||'';const v=cell.querySelector('v');if(!v)return'';if(t==='s')return strings[parseInt(v.textContent)]||'';return v.textContent||'';}
+    function colIdx(ref){const m=ref.match(/^([A-Z]+)/);if(!m)return 0;return m[1].split('').reduce((n,c)=>n*26+c.charCodeAt(0)-64,0)-1;}
+    const txs=[];let headers={};
+    rows.forEach((row,ri)=>{
+      const cells=[...row.querySelectorAll('c')];
+      const vals={};cells.forEach(c=>{const ref=c.getAttribute('r')||'';vals[colIdx(ref)]=cellVal(c);});
+      if(ri===0){Object.entries(vals).forEach(([i,v])=>{headers[v.toLowerCase().trim()]=parseInt(i);});return;}
+      const dI=headers['date']??0,tI=headers['time']??1,descI=headers['transaction details']??2;
+      const amtI=headers['amount']??5,tagI=headers['tags']??9;
+      const dateRaw=vals[dI]||'',timeRaw=vals[tI]||'',desc=(vals[descI]||'').trim();
+      const amtRaw=vals[amtI]||'',tagRaw=vals[tagI]||'';
+      if(!dateRaw||!desc)return;
+      const amtNum=parseFloat((amtRaw||'0').replace(/,/g,''));
+      if(amtNum===0)return;
+      const isDebit=amtNum<0,amt=Math.abs(amtNum);
+      const tag=tagRaw.replace(/#/g,'').replace(/[\u{1F300}-\u{1FFFF}]/gu,'').replace(/[^\x00-\x7F]/g,'').trim();
+      const dp=dateRaw.split('/');let month='Unknown';
+      if(dp.length===3){const d=new Date(parseInt(dp[2]),parseInt(dp[1])-1,parseInt(dp[0]));month=d.toLocaleDateString('en-IN',{month:'short',year:'numeric'});}
+      const cat=categorize(desc,tag);
+      const id=(dateRaw+timeRaw+desc+amt).replace(/\W/g,'');
+      txs.push({id,date:dateRaw,time:timeRaw.slice(0,5),desc,amount:isDebit?amt:0,credit:isDebit?0:amt,tag,cat,month});
+    });
+    prog(90);
+    if(!txs.length){stat('❌ No transactions found. Make sure this is the Paytm UPI Statement Excel file.','err');prog(0);return;}
+    const ex=new Set(DB.tx.map(t=>`${t.date}|${t.desc}|${t.amount}|${t.credit}`));
+    const fresh=txs.filter(t=>!ex.has(`${t.date}|${t.desc}|${t.amount}|${t.credit}`));
+    DB.tx=[...DB.tx,...fresh];
+    prog(100);setTimeout(()=>prog(0),800);
+    stat(`✅ ${fresh.length} transactions imported from Excel!\n${txs.length-fresh.length} duplicates skipped.`,fresh.length>0?'ok':'err');
+    refreshAll();
+  }catch(err){console.error(err);stat('❌ Error: '+err.message,'err');prog(0);}
+}
+
+// ═══════════════════════════════════════════
+//  PDF PARSER — column-aware for Paytm table
+// ═══════════════════════════════════════════
 
 async function parsePDF(file){
   stat('⏳ Reading PDF...','load');prog(5);
