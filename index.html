@@ -404,7 +404,9 @@ function parseMonthKey(dateStr){
   const MMAP={Jan:0,Feb:1,Mar:2,Apr:3,May:4,Jun:5,Jul:6,Aug:7,Sep:8,Oct:9,Nov:10,Dec:11};
   const m=dateStr.match(/(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)(?:\s+(\d{2,4}))?/i);
   if(!m)return'Unknown';
-  const yr=m[3]?(m[3].length===2?2000+parseInt(m[3]):parseInt(m[3])):new Date().getFullYear();
+  let yr=m[3]?(m[3].length===2?2000+parseInt(m[3]):parseInt(m[3])):new Date().getFullYear();
+  // Sanity check — Paytm statements won't be from before 2015 or after 2030
+  if(yr<2015||yr>2030) yr=new Date().getFullYear();
   return new Date(yr,MMAP[m[2]],parseInt(m[1])).toLocaleDateString('en-IN',{month:'short',year:'numeric'});
 }
 function monthKey(m){const ms=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];if(!m||m==='Unknown')return'0000-00';const p=m.split(' ');return`${p[1]}-${String(ms.indexOf(p[0])+1).padStart(2,'0')}`;}
